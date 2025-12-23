@@ -2,217 +2,277 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>XMAS 3D Magic</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>3D 梦幻粒子星系圣诞树 - 手势交互版</title>
     <style>
-        body { margin: 0; background: #010205; overflow: hidden; color: white; font-family: sans-serif; }
-        #canvas-container { width: 100vw; height: 100vh; touch-action: none; }
-        #loading {
-            position: fixed; inset: 0; background: #010205;
-            display: flex; flex-direction: column; justify-content: center; align-items: center;
-            z-index: 1000;
-        }
-        #debug-log {
-            position: fixed; top: 10px; right: 10px; font-size: 10px; color: #00ff00;
-            z-index: 1001; pointer-events: none; max-width: 200px;
-        }
-        .glass-card {
-            position: absolute; top: 20px; left: 20px;
-            background: rgba(255, 255, 255, 0.1); backdrop-filter: blur(10px);
-            padding: 15px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.2);
-            z-index: 100; pointer-events: none;
-        }
-        #video-container {
-            position: absolute; bottom: 20px; right: 20px;
-            width: 120px; height: 160px; border-radius: 10px;
-            overflow: hidden; border: 1px solid gold; transform: scaleX(-1);
-            background: #000;
-        }
-        video { width: 100%; height: 100%; object-fit: cover; }
+        body { margin: 0; background: #010205; overflow: hidden; font-family: sans-serif; }
+        #canvas-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+        #video-container { position: absolute; bottom: 20px; right: 20px; width: 160px; height: 120px; 
+                           border-radius: 10px; overflow: hidden; border: 2px solid rgba(255,255,255,0.2); 
+                           z-index: 10; transform: scaleX(-1); }
+        #ui-overlay { position: absolute; top: 20px; left: 20px; color: white; z-index: 20; pointer-events: none; }
+        .status { font-size: 12px; opacity: 0.7; margin-top: 5px; }
+        #fallback-btn { position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%);
+                        padding: 12px 24px; background: rgba(255,255,255,0.1); border: 1px solid white;
+                        color: white; border-radius: 30px; cursor: pointer; backdrop-filter: blur(5px); }
     </style>
 </head>
 <body>
 
-    <div id="loading">
-        <div style="border: 3px solid gold; border-top: 3px solid transparent; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite;"></div>
-        <p id="loading-text">正在加载星系引擎...</p>
-    </div>
+<div id="ui-overlay">
+    <h2>3D GALAXY TREE</h2>
+    <div id="gesture-indicator">手势状态: 正在初始化...</div>
+    <div class="status">提示: [张开手掌] 爆发星系 | [握拳] 聚合成树</div>
+</div>
 
-    <div id="debug-log"></div>
+<div id="video-container">
+    <video id="input_video" playsinline webkit-playsinline muted autoplay></video>
+</div>
 
-    <div id="ui" class="glass-card">
-        <h2 style="margin:0; font-size: 16px; color: gold;">3D 粒子圣诞树</h2>
-        <p id="status" style="font-size: 12px; color: #00ffcc;">[等待手势]</p>
-    </div>
+<button id="fallback-btn">点击切换形态 (无摄像头模式)</button>
 
-    <div id="video-container">
-        <video id="input-video" playsinline webkit-playsinline muted autoplay></video>
-    </div>
+<div id="canvas-container"></div>
 
-    <div id="canvas-container"></div>
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.2/dist/gsap.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
 
-    <!-- 使用更稳定的 CDN 链接 -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+<script>
+/**
+ * 配置与状态
+ */
+const CONFIG = {
+    particleCount: 10000,
+    photoCount: 45,
+    colors: [0xffd700, 0xff0000, 0x228b22, 0xffffff], // 金、红、绿、白
+    isTree: true
+};
 
-    <script>
-        // 调试工具
-        const debugLog = document.getElementById('debug-log');
-        const log = (msg) => {
-            console.log(msg);
-            const div = document.createElement('div');
-            div.innerText = "> " + msg;
-            debugLog.appendChild(div);
-            if(debugLog.children.length > 8) debugLog.removeChild(debugLog.children[0]);
-        };
+let scene, camera, renderer, particles, photoGroup, star;
+let particlePositions = { tree: [], galaxy: [] };
+let photoData = [];
+let targetPositions = [];
 
-        log("系统启动...");
+/**
+ * 初始化 MediaPipe Hands
+ */
+const videoElement = document.getElementById('input_video');
+const gestureIndicator = document.getElementById('gesture-indicator');
 
-        let scene, camera, renderer, particles, photos, star, composer;
-        let handStatus = "open";
+const hands = new Hands({
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+});
+
+hands.setOptions({
+    maxNumHands: 1,
+    modelComplexity: 0, // 移动端性能优化
+    minDetectionConfidence: 0.5,
+    minTrackingConfidence: 0.5
+});
+
+hands.onResults(onHandResults);
+
+const cameraControl = new Camera(videoElement, {
+    onFrame: async () => { await hands.send({image: videoElement}); },
+    width: 640, height: 480
+});
+cameraControl.start().catch(() => {
+    gestureIndicator.innerText = "手势插件启动失败 (需HTTPS)";
+});
+
+/**
+ * 形状算法
+ */
+function generateShapes() {
+    // 1. 圣诞树算法 (分层圆锥)
+    for (let i = 0; i < CONFIG.particleCount; i++) {
+        const layer = Math.floor(Math.random() * 4);
+        const h = Math.random() * 20 - 10;
+        const radius = (10 - h) * 0.4 * (Math.random() * 0.5 + 0.5);
+        const angle = Math.random() * Math.PI * 2;
         
-        // --- 1. 初始化 3D 场景 ---
-        function initThree() {
-            log("初始化 3D...");
-            scene = new THREE.Scene();
-            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-            camera.position.set(0, 5, 20);
+        particlePositions.tree.push(
+            radius * Math.cos(angle),
+            h,
+            radius * Math.sin(angle)
+        );
 
-            renderer = new THREE.WebGLRenderer({ antialias: false, alpha: true });
-            renderer.setSize(window.innerWidth, window.innerHeight);
-            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-            document.getElementById('canvas-container').appendChild(renderer.domElement);
+        // 2. 星系算法 (旋涡)
+        const dist = Math.random() * 25;
+        const angleGal = dist * 0.5 + Math.random() * 2;
+        const spiralX = Math.cos(angleGal) * dist;
+        const spiralZ = Math.sin(angleGal) * dist;
+        const spiralY = (Math.random() - 0.5) * (30 / (dist + 1));
+        
+        particlePositions.galaxy.push(spiralX, spiralY, spiralZ);
+    }
+}
 
-            // 简单光照
-            const light = new THREE.PointLight(0xffd700, 10, 50);
-            light.position.set(0, 10, 0);
-            scene.add(light);
+/**
+ * 3D 场景初始化
+ */
+function initScene() {
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.z = 35;
 
-            createParticles();
-            log("3D 就绪.");
-        }
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    document.getElementById('canvas-container').appendChild(renderer.domElement);
 
-        function createParticles() {
-            const count = 6000;
-            const geo = new THREE.BufferGeometry();
-            const posTree = [];
-            const posGalaxy = [];
-            const current = [];
-            
-            for(let i=0; i<count; i++) {
-                // Tree
-                const rTree = (1 - i/count) * 6;
-                const aTree = (i/count) * Math.PI * 20;
-                posTree.push(Math.cos(aTree)*rTree, (i/count)*14 - 5, Math.sin(aTree)*rTree);
-                
-                // Galaxy
-                const rGal = 5 + Math.random() * 15;
-                const aGal = Math.random() * Math.PI * 2;
-                posGalaxy.push(Math.cos(aGal)*rGal, (Math.random()-0.5)*5, Math.sin(aGal)*rGal);
-                
-                current.push(posGalaxy[i*3], posGalaxy[i*3+1], posGalaxy[i*3+2]);
-            }
+    generateShapes();
 
-            geo.setAttribute('position', new THREE.Float32BufferAttribute(current, 3));
-            particles = new THREE.Points(geo, new THREE.PointsMaterial({
-                size: 0.1, color: 0x00ffcc, transparent: true, opacity: 0.8
-            }));
-            particles.userData = { t: posTree, g: posGalaxy };
-            scene.add(particles);
+    // 粒子系统
+    const geometry = new THREE.BufferGeometry();
+    const positions = new Float32Array(particlePositions.tree);
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
 
-            // 星星
-            star = new THREE.Mesh(new THREE.SphereGeometry(0.5, 8, 8), new THREE.MeshBasicMaterial({color: 0xffd700}));
-            star.position.y = 9;
-            star.scale.set(0.01, 0.01, 0.01);
-            scene.add(star);
-        }
+    const colors = new Float32Array(CONFIG.particleCount * 3);
+    for(let i=0; i<CONFIG.particleCount; i++) {
+        const color = new THREE.Color(CONFIG.colors[Math.floor(Math.random()*4)]);
+        color.toArray(colors, i * 3);
+    }
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
-        function morph(mode) {
-            const pos = particles.geometry.attributes.position;
-            const target = mode === 'tree' ? particles.userData.t : particles.userData.g;
-            for(let i=0; i<pos.count; i++) {
-                gsap.to(pos.array, {
-                    [i*3]: target[i*3], [i*3+1]: target[i*3+1], [i*3+2]: target[i*3+2],
-                    duration: 1.5, ease: "power2.inOut", onUpdate: () => pos.needsUpdate = true
-                });
-            }
-            gsap.to(star.scale, { x: mode==='tree'?1:0.01, y: mode==='tree'?1:0.01, z: mode==='tree'?1:0.01 });
-        }
+    const material = new THREE.PointsMaterial({
+        size: 0.12,
+        vertexColors: true,
+        transparent: true,
+        blending: THREE.AdditiveBlending
+    });
 
-        // --- 2. 初始化摄像头 (适配手机) ---
-        async function initCamera() {
-            log("请求摄像头...");
-            const video = document.getElementById('input-video');
-            const hands = new Hands({
-                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
-            });
+    particles = new THREE.Points(geometry, material);
+    scene.add(particles);
 
-            hands.setOptions({
-                maxNumHands: 1,
-                modelComplexity: 0, // 手机端使用 0 提高帧率
-                minDetectionConfidence: 0.5,
-                minTrackingConfidence: 0.5
-            });
+    // 照片粒子系统
+    photoGroup = new THREE.Group();
+    const loader = new THREE.TextureLoader();
+    for(let i=0; i<CONFIG.photoCount; i++) {
+        const tex = loader.load(`https://picsum.photos/200?random=${i}`);
+        const mat = new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide });
+        const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 1.2), mat);
+        
+        // 初始位置同步树形
+        const idx = Math.floor(Math.random() * CONFIG.particleCount) * 3;
+        mesh.position.set(positions[idx], positions[idx+1], positions[idx+2]);
+        
+        photoGroup.add(mesh);
+        photoData.push({ mesh, offsetIdx: idx });
+    }
+    scene.add(photoGroup);
 
-            hands.onResults(res => {
-                if (res.multiHandLandmarks?.length > 0) {
-                    const lm = res.multiHandLandmarks[0];
-                    const isFist = Math.hypot(lm[8].x - lm[0].x, lm[8].y - lm[0].y) < 0.3;
-                    if(isFist && handStatus !== "fist") {
-                        handStatus = "fist"; morph("tree");
-                        document.getElementById('status').innerText = "✊ 圣诞树模式";
-                    } else if(!isFist && handStatus === "fist") {
-                        handStatus = "open"; morph("galaxy");
-                        document.getElementById('status').innerText = "🖐️ 银河模式";
-                    }
-                }
-            });
+    // 树顶星
+    const starShape = new THREE.Shape();
+    for(let i=0; i<10; i++) {
+        const r = (i % 2 === 0) ? 1.5 : 0.6;
+        const a = (i / 10) * Math.PI * 2;
+        if(i===0) starShape.moveTo(Math.cos(a)*r, Math.sin(a)*r);
+        else starShape.lineTo(Math.cos(a)*r, Math.sin(a)*r);
+    }
+    const starGeo = new THREE.ExtrudeGeometry(starShape, { depth: 0.2, bevelEnabled: false });
+    star = new THREE.Mesh(starGeo, new THREE.MeshBasicMaterial({ color: 0xffd700 }));
+    star.position.y = 10.5;
+    scene.add(star);
 
-            try {
-                const cam = new Camera(video, {
-                    onFrame: async () => await hands.send({ image: video }),
-                    facingMode: 'user',
-                    width: 480, height: 640
-                });
-                await cam.start();
-                log("摄像头已启动.");
-                document.getElementById('loading').style.display = 'none';
-            } catch (e) {
-                log("无法启动摄像头: " + e.message);
-                alert("摄像头启动失败，请检查是否为 HTTPS 环境并允许了权限。");
-                document.getElementById('loading').style.display = 'none';
-            }
-        }
+    animate();
+}
 
-        // --- 3. 运行 ---
-        function animate() {
-            requestAnimationFrame(animate);
-            if(particles) particles.rotation.y += 0.005;
-            renderer.render(scene, camera);
-        }
+/**
+ * 核心逻辑：形态切换动画
+ */
+function toggleMorph(toTree) {
+    if (CONFIG.isTree === toTree) return;
+    CONFIG.isTree = toTree;
+    
+    const source = toTree ? particlePositions.galaxy : particlePositions.tree;
+    const target = toTree ? particlePositions.tree : particlePositions.galaxy;
+    
+    const posAttr = particles.geometry.attributes.position;
+    
+    // 粒子动画
+    gsap.to(posAttr.array, {
+        duration: 2,
+        endArray: target,
+        ease: "power3.inOut",
+        onUpdate: () => posAttr.needsUpdate = true
+    });
 
-        // 交互备份
-        window.addEventListener('pointerdown', () => {
-            handStatus = (handStatus === 'open') ? 'fist' : 'open';
-            morph(handStatus === 'fist' ? 'tree' : 'galaxy');
-            document.getElementById('status').innerText = "点击切换: " + handStatus;
+    // 照片动画
+    photoData.forEach((item) => {
+        const idx = item.offsetIdx;
+        gsap.to(item.mesh.position, {
+            duration: 2.2,
+            x: target[idx],
+            y: target[idx+1],
+            z: target[idx+2],
+            ease: "expo.out"
         });
+    });
 
-        initThree();
-        animate();
-        initCamera();
+    // 树顶星动画
+    gsap.to(star.scale, {
+        duration: 1,
+        x: toTree ? 1 : 0,
+        y: toTree ? 1 : 0,
+        z: toTree ? 1 : 0
+    });
+}
 
-        // 兜底逻辑：如果 10 秒还没加载完，直接强制关闭 Loading
-        setTimeout(() => {
-            if(document.getElementById('loading').style.display !== 'none') {
-                log("检测到加载超时，尝试直接进入...");
-                document.getElementById('loading').style.display = 'none';
-            }
-        }, 10000);
+/**
+ * 手势处理回执
+ */
+function onHandResults(results) {
+    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        const landmarks = results.multiHandLandmarks[0];
+        
+        // 简单的张开/握拳判断 (基于食指尖与掌心的距离)
+        const dist = Math.hypot(landmarks[8].x - landmarks[0].x, landmarks[8].y - landmarks[0].y);
+        
+        if (dist > 0.4) {
+            gestureIndicator.innerText = "手势状态: 五指张开 (星系)";
+            toggleMorph(false);
+        } else if (dist < 0.2) {
+            gestureIndicator.innerText = "手势状态: 握拳 (圣诞树)";
+            toggleMorph(true);
+        }
 
-    </script>
-    <style>@keyframes spin { to { transform: rotate(360deg); } }</style>
+        // 挥动控制旋转
+        const centerX = landmarks[0].x;
+        particles.rotation.y += (centerX - 0.5) * 0.1;
+        photoGroup.rotation.y += (centerX - 0.5) * 0.1;
+    }
+}
+
+function animate() {
+    requestAnimationFrame(animate);
+    
+    // 基础漂浮感
+    const time = Date.now() * 0.001;
+    particles.rotation.y += 0.002;
+    photoGroup.rotation.y += 0.002;
+    
+    // 照片始终面向相机
+    photoGroup.children.forEach(p => p.lookAt(camera.position));
+    
+    renderer.render(scene, camera);
+}
+
+// 适配调整
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// 备用交互
+document.getElementById('fallback-btn').addEventListener('click', () => {
+    toggleMorph(!CONFIG.isTree);
+});
+
+// 启动
+initScene();
+</script>
 </body>
 </html>
