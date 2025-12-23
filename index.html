@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D 粒子梦幻圣诞树 - 视觉增强版</title>
+    <style>
+        body { margin: 0; background: #010205; overflow: hidden; font-family: 'PingFang SC', sans-serif; }
+        #canvas-container { width: 100vw; height: 100vh; }
+        
+        #ui-overlay {
+            position: absolute; top: 30px; left: 30px; color: white;
+            z-index: 10; pointer-events: none;
+        }
+        .glass-card {
+            background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(15px);
+            padding: 25px; border-radius: 20px; border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 10px 40px rgba(0,0,0,0.8); pointer-events: auto;
+        }
+        h1 { margin: 0; font-size: 22px; color: #f0c27b; font-weight: 200; letter-spacing: 4px; }
+        .hint { font-size: 13px; opacity: 0.7; margin-top: 15px; line-height: 1.8; }
+        .status-tag { color: #00ffcc; font-weight: bold; background: rgba(0,255,204,0.1); padding: 2px 8px; border-radius: 4px; }
+
+        #video-container {
+            position: absolute; bottom: 25px; right: 25px;
+            width: 180px; height: 135px; border-radius: 15px;
+            border: 1px solid rgba(255,255,255,0.2); overflow: hidden;
+            transform: scaleX(-1); background: #000; box-shadow: 0 5px 20px rgba(0,0,0,0.5);
+        }
+        #input-video { width: 100%; height: 100%; object-fit: cover; }
+        
+        #loading {
+            position: fixed; inset: 0; background: #010205;
+            display: flex; justify-content: center; align-items: center;
+            color: white; z-index: 100; letter-spacing: 2px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="loading">正在编织星辰...</div>
+
+    <div id="ui-overlay">
+        <div class="glass-card">
+            <h1>XMAS MAGICAL ORBIT</h1>
+            <div class="hint">
+                <span id="gesture-status" class="status-tag">等待检测</span><br><br>
+                • ✊ <b>握拳</b>: 凝聚圣诞树形状<br>
+                • 🖐️ <b>张开</b>: 爆发梦幻星系云<br>
+                • ↔️ <b>挥动</b>: 拨动星尘旋转<br>
+                <hr style="opacity:0.1; margin: 15px 0;">
+                • <b>点击/拖拽鼠标</b>亦可交互
+            </div>
+        </div>
+    </div>
+
+    <div id="video-container"><video id="input-video"></video></div>
+    <div id="canvas-container"></div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+        // --- 核心配置 ---
+        const PARTICLE_COUNT = 10000;
+        const PHOTO_COUNT = 45;
+        const textureLoader = new THREE.TextureLoader();
+        let scene, camera, renderer, composer, particles, photos, star;
+        let handStatus = "open";
+        let lastHandX = 0;
+
+        const onlinePhotos = Array.from({length: 12}, (_, i) => `https://picsum.photos/seed/${i+10}/300/300`);
+
+        // --- 1. 初始化场景 ---
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 5, 20);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+            const renderPass = new RenderPass(scene, camera);
+            const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.6, 0.5, 0.8);
+            composer = new EffectComposer(renderer);
+            composer.addPass(renderPass);
+            composer.addPass(bloomPass);
+
+            createGalaxyAndTree();
+            createStarTopper();
+            setupInteractions();
+            
+            window.addEventListener('resize', onResize);
+            animate();
+        }
+
+        // --- 2. 形状算法：分层圣诞树 & 旋涡星系 ---
+        function createGalaxyAndTree() {
+            const geo = new THREE.BufferGeometry();
+            const posTree = new Float32Array(PARTICLE_COUNT * 3);
+            const posGalaxy = new Float32Array(PARTICLE_COUNT * 3);
+            const current = new Float32Array(PARTICLE_COUNT * 3);
+            const colors = new Float32Array(PARTICLE_COUNT * 3);
+            const sizes = new Float32Array(PARTICLE_COUNT);
+
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                // --- 圣诞树算法 (带层次感) ---
+                const yRatio = Math.random();
+                const height = 14;
+                const y = yRatio * height - 5;
+                // 模拟分层感: 每隔一段距离半径收缩再张开
+                const layerEffect = Math.cos(yRatio * 15) * 0.2 + 0.8;
+                const radius = (1.0 - yRatio) * 6 * layerEffect;
+                const angle = Math.random() * Math.PI * 2;
+                
+                posTree[i*3] = Math.cos(angle) * radius * Math.pow(Math.random(), 0.5);
+                posTree[i*3+1] = y;
+                posTree[i*3+2] = Math.sin(angle) * radius * Math.pow(Math.random(), 0.5);
+
+                // --- 银河星系算法 (旋涡状) ---
+                const angleGal = Math.random() * Math.PI * 2;
+                const radiusGal = 5 + Math.pow(Math.random(), 2) * 20;
+                const swirl = radiusGal * 0.5;
+                posGalaxy[i*3] = Math.cos(angleGal + swirl) * radiusGal;
+                posGalaxy[i*3+1] = (Math.random() - 0.5) * (15 / (radiusGal * 0.5 + 1)); // 核心厚外围薄
+                posGalaxy[i*3+2] = Math.sin(angleGal + swirl) * radiusGal;
+
+                current[i*3] = posGalaxy[i*3];
+                current[i*3+1] = posGalaxy[i*3+1];
+                current[i*3+2] = posGalaxy[i*3+2];
+
+                // 颜色
+                const color = new THREE.Color();
+                if (Math.random() > 0.8) color.setHex(0xffd700); // 金色
+                else if (Math.random() > 0.5) color.setHex(0xffffff); // 白色
+                else color.setHSL(0.35 + Math.random() * 0.1, 0.8, 0.5); // 翠绿色系
+                
+                colors[i*3] = color.r; colors[i*3+1] = color.g; colors[i*3+2] = color.b;
+                sizes[i] = Math.random() * 2;
+            }
+
+            geo.setAttribute('position', new THREE.BufferAttribute(current, 3));
+            geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            geo.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+
+            const mat = new THREE.PointsMaterial({
+                size: 0.15, vertexColors: true, transparent: true, opacity: 0.8,
+                blending: THREE.AdditiveBlending, map: createParticleTex()
+            });
+
+            particles = new THREE.Points(geo, mat);
+            particles.userData = { posTree, posGalaxy };
+            scene.add(particles);
+
+            // --- 照片粒子 (始终环绕) ---
+            photos = new THREE.Group();
+            for(let i=0; i<PHOTO_COUNT; i++) {
+                const tex = textureLoader.load(onlinePhotos[i % onlinePhotos.length]);
+                const mesh = new THREE.Mesh(
+                    new THREE.PlaneGeometry(0.8, 0.8),
+                    new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide, transparent: true, opacity: 0.9 })
+                );
+                const pIdx = Math.floor(Math.random() * PARTICLE_COUNT);
+                mesh.userData = {
+                    t: new THREE.Vector3(posTree[pIdx*3], posTree[pIdx*3+1], posTree[pIdx*3+2]),
+                    g: new THREE.Vector3(posGalaxy[pIdx*3], posGalaxy[pIdx*3+1], posGalaxy[pIdx*3+2])
+                };
+                mesh.position.copy(mesh.userData.g);
+                photos.add(mesh);
+            }
+            scene.add(photos);
+        }
+
+        // --- 3. 几何体五角星 ---
+        function createStarTopper() {
+            const shape = new THREE.Shape();
+            const points = 5;
+            const innerRadius = 0.3;
+            const outerRadius = 0.8;
+            for (let i = 0; i < points * 2; i++) {
+                const r = i % 2 === 0 ? outerRadius : innerRadius;
+                const a = (i * Math.PI) / points;
+                if (i === 0) shape.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+                else shape.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+            }
+            const extrudeSettings = { depth: 0.2, bevelEnabled: true, bevelThickness: 0.05, bevelSize: 0.05 };
+            const starGeo = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+            const starMat = new THREE.MeshStandardMaterial({ 
+                color: 0xffd700, metalness: 1, roughness: 0.2, emissive: 0xffaa00, emissiveIntensity: 1 
+            });
+            star = new THREE.Mesh(starGeo, starMat);
+            star.position.y = 9.2;
+            star.scale.set(0, 0, 0);
+            scene.add(star);
+            
+            const light = new THREE.PointLight(0xffaa00, 10, 10);
+            light.position.y = 9.2;
+            scene.add(light);
+        }
+
+        function createParticleTex() {
+            const c = document.createElement('canvas');
+            c.width = 64; c.height = 64;
+            const ctx = c.getContext('2d');
+            const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+            g.addColorStop(0, 'rgba(255,255,255,1)');
+            g.addColorStop(0.2, 'rgba(255,255,255,0.8)');
+            g.addColorStop(0.5, 'rgba(255,255,255,0.2)');
+            g.addColorStop(1, 'rgba(255,255,255,0)');
+            ctx.fillStyle = g; ctx.fillRect(0, 0, 64, 64);
+            return new THREE.CanvasTexture(c);
+        }
+
+        // --- 4. 动画与交互 ---
+        function morph(mode) {
+            const pos = particles.geometry.attributes.position;
+            const target = mode === 'tree' ? particles.userData.posTree : particles.userData.posGalaxy;
+            
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                gsap.to(pos.array, {
+                    [i*3]: target[i*3], [i*3+1]: target[i*3+1], [i*3+2]: target[i*3+2],
+                    duration: 2.5, ease: mode === 'tree' ? "back.out(1.2)" : "expo.out",
+                    delay: Math.random() * 0.6,
+                    onUpdate: () => { if(i===0) pos.needsUpdate = true; }
+                });
+            }
+            
+            photos.children.forEach(m => {
+                const dest = mode === 'tree' ? m.userData.t : m.userData.g;
+                gsap.to(m.position, { x: dest.x, y: dest.y, z: dest.z, duration: 2, ease: "power3.inOut" });
+            });
+
+            gsap.to(star.scale, {
+                x: mode==='tree'?1.2:0, y: mode==='tree'?1.2:0, z: mode==='tree'?1.2:0,
+                duration: 1, ease: "elastic.out(1, 0.5)"
+            });
+        }
+
+        function setupInteractions() {
+            let isDragging = false;
+            window.addEventListener('mousedown', () => isDragging = false);
+            window.addEventListener('mousemove', (e) => {
+                isDragging = true;
+                if(e.buttons === 1) {
+                    particles.rotation.y += e.movementX * 0.005;
+                    photos.rotation.y += e.movementX * 0.005;
+                }
+            });
+            window.addEventListener('mouseup', () => {
+                if(!isDragging) {
+                    handStatus = (handStatus === 'open') ? 'fist' : 'open';
+                    morph(handStatus === 'fist' ? 'tree' : 'galaxy');
+                }
+            });
+            initMediaPipe();
+        }
+
+        async function initMediaPipe() {
+            const video = document.getElementById('input-video');
+            const status = document.getElementById('gesture-status');
+            try {
+                const hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+                hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.7 });
+                hands.onResults(res => {
+                    if (res.multiHandLandmarks?.length > 0) {
+                        const lm = res.multiHandLandmarks[0];
+                        const dist = Math.hypot(lm[8].x - lm[0].x, lm[8].y - lm[0].y);
+                        const isFist = dist < 0.28;
+                        if (isFist && handStatus !== "fist") {
+                            handStatus = "fist"; morph('tree');
+                            status.innerText = "✊ 圣诞树模式";
+                        } else if (!isFist && handStatus === "fist") {
+                            handStatus = "open"; morph('galaxy');
+                            status.innerText = "🖐️ 银河模式";
+                        }
+                        const dx = lm[0].x - lastHandX;
+                        if(Math.abs(dx) > 0.01) { particles.rotation.y += dx * 4; photos.rotation.y += dx * 4; }
+                        lastHandX = lm[0].x;
+                    }
+                });
+                const cam = new Camera(video, { onFrame: async () => await hands.send({ image: video }), width: 640, height: 480 });
+                await cam.start();
+                document.getElementById('loading').style.display = 'none';
+            } catch (e) {
+                console.error(e);
+                document.getElementById('loading').innerText = "摄像头不可用，使用鼠标点击控制";
+                setTimeout(() => document.getElementById('loading').style.display = 'none', 2000);
+            }
+        }
+
+        function onResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const time = Date.now() * 0.001;
+            particles.rotation.y += 0.001;
+            photos.rotation.y += 0.001;
+            // 粒子微动（Twinkle）
+            particles.geometry.attributes.position.array.forEach((v, i) => {
+                if (i % 3 === 1) particles.geometry.attributes.position.array[i] += Math.sin(time + i) * 0.002;
+            });
+            particles.geometry.attributes.position.needsUpdate = true;
+            
+            photos.children.forEach(p => p.lookAt(camera.position));
+            if(star) {
+                star.rotation.z = Math.sin(time) * 0.2;
+                star.rotation.y += 0.01;
+            }
+            composer.render();
+        }
+
+        init();
+    </script>
+</body>
+</html>
