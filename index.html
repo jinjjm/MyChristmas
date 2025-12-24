@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>3D 深度星系圣诞树 - 音乐交互版</title>
+    <title>3D 深度星系圣诞树 - 手势稳定版</title>
     <style>
         body { margin: 0; background: #00050a; overflow: hidden; font-family: -apple-system, sans-serif; }
         #canvas-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
@@ -39,7 +39,7 @@
 
 <audio id="bg-music" loop>
     <source src="https://mdn.github.io/learning-area/javascript/apis/video-audio/finished/audio/viper.mp3" type="audio/mpeg">
-    </audio>
+</audio>
 
 <div id="ui-overlay">
     <h2 style="margin:0; letter-spacing: 3px; font-size: 35px; font-weight: 300; 
@@ -149,18 +149,25 @@ function createStar() {
 
 function zoomIn(photo) {
     if (!photo || currentHandState !== "IDLE") return;
-    currentHandState = "PINCHING";
+    currentHandState = "ANIMATING"; // 防止动画中重复触发
     selectedPhoto = photo;
+
     photo.oldPos = photo.mesh.position.clone();
     photo.oldScale = photo.mesh.scale.clone();
     photo.oldRot = photo.mesh.rotation.clone();
 
+    scene.attach(photo.mesh); 
+
+    const targetPos = new THREE.Vector3(0, 0, -15);
+    targetPos.applyQuaternion(camera.quaternion);
+    targetPos.add(camera.position);
+
     gsap.to(photo.mesh.position, { 
-        duration: 0.7, x: 0, y: 0, z: 25, ease: "power3.out",
+        duration: 0.8, x: targetPos.x, y: targetPos.y, z: targetPos.z, ease: "back.out(1.2)",
         onComplete: () => { currentHandState = "ZOOMED"; }
     });
-    gsap.to(photo.mesh.scale, { duration: 0.7, x: 10, y: 10, z: 10, ease: "power3.out" });
-    gsap.to(photo.mesh.rotation, { duration: 0.7, x: 0, y: 0, z: 0, ease: "power3.out" });
+    gsap.to(photo.mesh.scale, { duration: 0.8, x: 12, y: 12, z: 12, ease: "back.out(1.2)" });
+    
     photo.mesh.material.depthTest = false;
     photo.mesh.renderOrder = 9999;
 }
@@ -168,7 +175,10 @@ function zoomIn(photo) {
 function zoomOut() {
     if (!selectedPhoto || currentHandState !== "ZOOMED") return;
     const p = selectedPhoto;
-    currentHandState = "PINCHING";
+    currentHandState = "ANIMATING";
+
+    photoGroup.attach(p.mesh);
+
     gsap.to(p.mesh.position, { duration: 0.7, x: p.oldPos.x, y: p.oldPos.y, z: p.oldPos.z, ease: "power2.inOut" });
     gsap.to(p.mesh.scale, { duration: 0.7, x: p.oldScale.x, y: p.oldScale.y, z: p.oldScale.z, ease: "power2.inOut" });
     gsap.to(p.mesh.rotation, { 
@@ -185,25 +195,34 @@ function zoomOut() {
 function setupMediaPipe() {
     const video = document.getElementById('input_video');
     const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
-    hands.setOptions({ maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: 0.7 });
+    hands.setOptions({ maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: 0.75 });
     
     hands.onResults(results => {
         const statusDiv = document.getElementById('gesture-status');
         if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
             const landmarks = results.multiHandLandmarks[0];
+            
+            // 捏合判断 (食指与拇指距离)
             const pinchDist = Math.hypot(landmarks[8].x - landmarks[4].x, landmarks[8].y - landmarks[4].y);
-            const isPinching = pinchDist < 0.05; 
-            const isOpen = landmarks[8].y < landmarks[7].y && pinchDist > 0.12;
+            const isPinching = pinchDist < 0.04; 
+            
+            // 张开手判断 (多指伸直)
+            const isOpen = landmarks[8].y < landmarks[6].y && landmarks[12].y < landmarks[10].y && pinchDist > 0.15;
+            
+            // 握拳判断 (切换模式)
             const isFist = Math.hypot(landmarks[8].x - landmarks[0].x, landmarks[8].y - landmarks[0].y) < 0.22;
 
+            // 模式切换逻辑
             if (currentHandState === "IDLE" && (Date.now() - lastToggleTime > 1500)) {
                 if (isFist && !isTree) { toggleMode(true); lastToggleTime = Date.now(); }
                 else if (isOpen && isTree) { toggleMode(false); lastToggleTime = Date.now(); }
             }
 
+            // 交互逻辑
             if (!isTree) {
                 if (currentHandState === "IDLE") {
                     if (isPinching) {
+                        // 寻找距离屏幕中心最近的图片
                         let closest = null, minDist = Infinity;
                         photoData.forEach(p => {
                             const v = p.mesh.position.clone().applyMatrix4(photoGroup.matrixWorld); 
@@ -213,19 +232,28 @@ function setupMediaPipe() {
                         });
                         if(closest) zoomIn(closest);
                     } else {
-                        particles.rotation.y += (landmarks[0].x - 0.5) * 0.035;
-                        photoGroup.rotation.y += (landmarks[0].x - 0.5) * 0.035;
+                        // 未操作时随手部转动
+                        particles.rotation.y += (landmarks[0].x - 0.5) * 0.04;
+                        photoGroup.rotation.y += (landmarks[0].x - 0.5) * 0.04;
                     }
                 } else if (currentHandState === "ZOOMED" && isOpen) {
+                    // 只有明确张开手才缩小
                     zoomOut();
                 }
             } else {
-                particles.rotation.y += (landmarks[0].x - 0.5) * 0.05;
-                photoGroup.rotation.y += (landmarks[0].x - 0.5) * 0.05;
+                particles.rotation.y += (landmarks[0].x - 0.5) * 0.06;
+                photoGroup.rotation.y += (landmarks[0].x - 0.5) * 0.06;
             }
-            statusDiv.innerText = currentHandState === "ZOOMED" ? "👌 已选中图片 | 张开手还原" : (isTree ? "🎄 圣诞树 | 张开手切换" : "🌌 星系 | 捏合拾取图片");
+
+            // 更新 UI 提示
+            if (currentHandState === "ZOOMED") {
+                statusDiv.innerText = "✨ 已聚焦照片 | 张开手掌返回星系";
+            } else {
+                statusDiv.innerText = isTree ? "🎄 圣诞树模式 | 张开手切换星系" : "🌌 星系模式 | 捏合指尖拾取照片";
+            }
         } else {
-            if (currentHandState === "ZOOMED") zoomOut();
+            // 丢失手势时不自动返回，保持聚焦，除非想自动返回可取消下面注释
+            // if (currentHandState === "ZOOMED") zoomOut();
             statusDiv.innerText = "请将手部对准摄像头";
         }
     });
@@ -238,7 +266,6 @@ function toggleMode(toTree) {
     isTree = toTree;
     const target = isTree ? positions.tree : positions.galaxy;
     
-    // 模式切换时的音频联动
     const music = document.getElementById('bg-music');
     if (music) {
         gsap.to(music, { playbackRate: isTree ? 1.0 : 0.85, duration: 2 });
@@ -251,7 +278,9 @@ function toggleMode(toTree) {
     });
 
     photoData.forEach(p => {
-        gsap.to(p.mesh.position, { duration: 2.2, x: target[p.pIdx*3], y: target[p.pIdx*3+1], z: target[p.pIdx*3+2], ease: "expo.inOut" });
+        if(p.mesh.parent === photoGroup) {
+            gsap.to(p.mesh.position, { duration: 2.2, x: target[p.pIdx*3], y: target[p.pIdx*3+1], z: target[p.pIdx*3+2], ease: "expo.inOut" });
+        }
         gsap.to(p.mesh.scale, { duration: 2, x: isTree?1:1.8, y: isTree?1:1.8, z: 1 });
     });
     
@@ -268,22 +297,19 @@ function animate() {
             p.mesh.lookAt(camera.position);
         });
     } else if (selectedPhoto) {
-        selectedPhoto.mesh.lookAt(camera.position);
+        selectedPhoto.mesh.quaternion.copy(camera.quaternion);
     }
     renderer.render(scene, camera);
 }
 
 function startExperience() {
     document.getElementById('start-mask').style.display = 'none';
-    
-    // 音乐播放及渐入
     const music = document.getElementById('bg-music');
     if (music) {
         music.volume = 0;
         music.play().catch(e => console.log("Audio play failed", e));
         gsap.to(music, { volume: 0.4, duration: 3 });
     }
-
     init();
     setupMediaPipe();
 }
